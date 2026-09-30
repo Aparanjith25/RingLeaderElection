@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Basic Ring Leader Election</title>
+
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Arial, sans-serif; background: #f1f5f9; color: #172033; }
+header { background: #14213d; color: white; padding: 24px; text-align: center; }
+header h1 { margin: 0 0 8px; }
+header p { margin: 0; color: #cbd5e1; }
+main { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+.panel { background: white; padding: 20px; border-radius: 14px; margin-bottom: 20px; box-shadow: 0 3px 12px #0000000c; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; }
+button { border: 0; border-radius: 8px; padding: 12px 20px; font-size: 15px; cursor: pointer; background: #2563eb; color: white; }
+button:hover { opacity: .88; }
+button.secondary { background: #475569; }
+button:disabled { opacity: .4; cursor: not-allowed; }
+#status { margin-top: 16px; padding: 14px; background: #eff6ff; border-radius: 8px; line-height: 1.5; }
+#leader { color: #15803d; font-weight: bold; }
+svg { width: 100%; max-height: 520px; display: block; }
+.edge { stroke: #94a3b8; stroke-width: 3; fill: none; }
+.node { fill: #dbeafe; stroke: #2563eb; stroke-width: 3; }
+.node.out { fill: #e2e8f0; stroke: #94a3b8; }
+.node.active { fill: #fbbf24; stroke: #d97706; }
+.node.leader { fill: #86efac; stroke: #15803d; }
+.node-label { font-size: 17px; font-weight: bold; text-anchor: middle; dominant-baseline: middle; }
+.id-label { font-size: 13px; text-anchor: middle; fill: #475569; }
+.token { fill: #ef4444; stroke: white; stroke-width: 2; }
+.token-label { font-size: 12px; font-weight: bold; fill: white; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 14px; color: #475569; }
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 5px; }
+#log { max-height: 220px; overflow-y: auto; line-height: 1.7; font-size: 14px; }
+.id-editor { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.id-editor label { font-size: 14px; color: #475569; display: flex; flex-direction: column; gap: 4px; }
+.id-editor input { padding: 10px; font-size: 15px; border: 2px solid #cbd5e1; border-radius: 8px; }
+.id-editor input:focus { outline: none; border-color: #2563eb; }
+#idError { margin-top: 12px; color: #b91c1c; min-height: 1.2em; font-size: 14px; }
+footer { text-align: center; padding: 20px; color: #64748b; }
+</style>
+</head>
+
+<body>
+
+<header>
+  <h1>Ring Leader Election Simulator</h1>
+  <p>Distributed Systems | Basic Ring Election Algorithm</p>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Network Topology</h2>
+    <div class="legend">
+      <span><i class="dot" style="background:#dbeafe"></i>Node</span>
+      <span><i class="dot" style="background:#fbbf24"></i>Active node</span>
+      <span><i class="dot" style="background:#e2e8f0"></i>Candidate eliminated</span>
+      <span><i class="dot" style="background:#ef4444"></i>Election message</span>
+      <span><i class="dot" style="background:#86efac"></i>Elected leader</span>
+    </div>
+
+    <svg id="network" viewBox="0 0 600 480"
+         aria-label="Six nodes connected in a ring"></svg>
+
+    <div class="controls">
+      <button id="start">▶ Start</button>
+      <button id="pause" class="secondary">⏸ Pause</button>
+      <button id="step" class="secondary">Next Step →</button>
+      <button id="reset" class="secondary">↻ Reset</button>
+    </div>
+
+    <div id="status" aria-live="polite">
+      Ready. Press Start or Next Step to begin the election.
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Configure Node IDs</h2>
+    <p style="margin-top:0;color:#475569;font-size:14px">Enter a unique positive whole number for each node. The node with the smallest ID wins. Applying new IDs resets the simulation.</p>
+    <div class="id-editor" id="idEditor"></div>
+    <div class="controls">
+      <button id="applyIds">Apply IDs</button>
+      <button id="randomIds" class="secondary">🎲 Randomize</button>
+      <button id="defaultIds" class="secondary">Default IDs</button>
+    </div>
+    <div id="idError" aria-live="polite"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Election Results</h2>
+    <p>Algorithm: Basic Ring Election (minimum ID wins)</p>
+    <p>Number of nodes: <strong>6</strong></p>
+    <p>Messages processed: <strong id="count">0</strong></p>
+    <p>Election status: <strong id="result">Not started</strong></p>
+    <p>Leader: <strong id="leader">Not elected</strong></p>
+  </section>
+
+  <section class="panel">
+    <h2>Election Event Log</h2>
+    <div id="log">Waiting for simulation...</div>
+  </section>
+</main>
+
+<footer>Basic Ring Election | Interactive Simulation</footer>
+
+<script>
+const ANIM_MS = 600;   // message travel time
+const GAP_MS  = 350;   // pause between steps in Start mode
+
+const DEFAULT_IDS = [6, 1, 2, 3, 4, 5];
+let ids = DEFAULT_IDS.slice();   // ID of N1..N6, ring goes N1 -> N2 -> ... -> N6 -> N1
+const N = ids.length;
+const cx = 300, cy = 235, radius = 155;
+
+const positions = ids.map((_, i) => {
+  const angle = -Math.PI / 2 + i * 2 * Math.PI / N;
+  return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+});
+
+const svg = document.getElementById("network");
+const NS = "http://www.w3.org/2000/svg";
+
+function element(tag, attrs = {}) {
+  const el = document.createElementNS(NS, tag);
+  Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+  return el;
+}
+
+// ---------- Draw ring ----------
+for (let i = 0; i < N; i++) {
+  const a = positions[i], b = positions[(i + 1) % N];
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const length = Math.hypot(dx, dy);
+  const ux = dx / length, uy = dy / length;
+
+  svg.appendChild(element("line", {
+    x1: a.x + ux * 27, y1: a.y + uy * 27,
+    x2: b.x - ux * 30, y2: b.y - uy * 30, class: "edge"
+  }));
+
+  const mx = b.x - ux * 34, my = b.y - uy * 34;
+  svg.appendChild(element("path", {
+    d: `M ${mx - 5 * uy} ${my + 5 * ux}
+        L ${mx + 5 * uy} ${my - 5 * ux}
+        L ${mx - 5 * uy - 8 * ux} ${my - 5 * ux - 8 * uy} Z`,
+    fill: "#64748b"
+  }));
+}
+
+const nodeEls = [];
+const idEls = [];
+positions.forEach((p, i) => {
+  const g = element("g");
+  const circle = element("circle", { cx: p.x, cy: p.y, r: 25, class: "node" });
+  const label = element("text", { x: p.x, y: p.y, class: "node-label" });
+  label.textContent = `N${i + 1}`;
+  const id = element("text", { x: p.x, y: p.y + 43, class: "id-label" });
+  id.textContent = `ID = ${ids[i]}`;
+  g.append(circle, label, id);
+  svg.appendChild(g);
+  nodeEls.push(circle);
+  idEls.push(id);
+});
+
+// Token drawn last so it sits above the nodes
+const token = element("circle", { r: 12, class: "token", visibility: "hidden" });
+const tokenLabel = element("text", { class: "token-label", visibility: "hidden" });
+svg.appendChild(token);
+svg.appendChild(tokenLabel);
+
+// ---------- Simulation state ----------
+// Basic Ring Election (Chang-Roberts style, minimum ID wins):
+//  * every node starts an election message carrying its own ID
+//  * a message travels clockwise, one hop per step
+//  * receiver ID  > candidate ID  -> forward the message
+//  * receiver ID  < candidate ID  -> discard the message
+//  * receiver ID == candidate ID  -> message went all the way round: that node is the leader
+// All messages wait in one FIFO queue, so every candidate keeps making progress
+// and a discarded message never blocks the others.
+let queue, messageCount, started, done, running, busy, gen, eliminated, leaderIndex, activeIndex;
+
+function pos(i) { return positions[i]; }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const $ = id => document.getElementById(id);
+
+function log(message) {
+  const line = document.createElement("div");
+  line.textContent = message;
+  $("log").prepend(line);
+}
+
+function setStatus(text) { $("status").textContent = text; }
+
+function renderNodes() {
+  nodeEls.forEach((el, i) => {
+    let cls = "node";
+    if (eliminated.has(i)) cls += " out";
+    if (i === leaderIndex) cls = "node leader";
+    else if (i === activeIndex) cls += " active";
+    el.setAttribute("class", cls);
+  });
+}
+
+function updateButtons() {
+  $("start").disabled = running || done;
+  $("start").textContent = (started && !running && !done) ? "▶ Resume" : "▶ Start";
+  $("pause").disabled = !running;
+  $("step").disabled = running || busy || done;
+}
+
+function hideToken() {
+  token.setAttribute("visibility", "hidden");
+  tokenLabel.setAttribute("visibility", "hidden");
+}
+
+function moveToken(x, y) {
+  token.setAttribute("cx", x); token.setAttribute("cy", y);
+  tokenLabel.setAttribute("x", x); tokenLabel.setAttribute("y", y);
+}
+
+function animateToken(from, to, candidate, myGen) {
+  return new Promise(resolve => {
+    const a = pos(from), b = pos(to);
+    tokenLabel.textContent = candidate;
+    token.setAttribute("visibility", "visible");
+    tokenLabel.setAttribute("visibility", "visible");
+    const t0 = performance.now();
+    function frame(now) {
+      if (myGen !== gen) return resolve(false);          // reset happened
+      const t = Math.min(1, (now - t0) / ANIM_MS);
+      moveToken(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+      if (t < 1) requestAnimationFrame(frame); else resolve(true);
+    }
+    requestAnimationFrame(frame);
+  });
+}
+
+function initElection() {
+  // every node initiates an election with its own ID
+  queue = ids.map((id, i) => ({ origin: i, candidate: id, at: i, hops: 0 }));
+  ids.forEach((id, i) => log(`Node ${i + 1} starts an election with ID ${id}.`));
+  // the log was prepended, so put the intro on top
+  log("Election started: every node initiates a message with its own ID.");
+  $("result").textContent = "In progress";
+  started = true;
+}
+
+// One message transmission = one step
+async function step() {
+  if (busy || done) return;
+  busy = true;
+  updateButtons();
+  const myGen = gen;
+
+  if (!started) initElection();
+
+  const msg = queue.shift();
+  const from = msg.at;
+  const to = (from + 1) % N;
+  const receiverId = ids[to];
+
+  activeIndex = null;
+  renderNodes();
+  setStatus(`Message with candidate ID ${msg.candidate} travels from Node ${from + 1} to Node ${to + 1}...`);
+
+  const ok = await animateToken(from, to, msg.candidate, myGen);
+  if (!ok || myGen !== gen) return;    // reset while animating
+
+  messageCount++;
+  $("count").textContent = messageCount;
+  activeIndex = to;
+  msg.at = to;
+  msg.hops++;
+  const at = `Node ${to + 1}`;
+
+  if (msg.candidate === receiverId) {
+    // Own message came back after a full ring traversal -> elected
+    leaderIndex = to;
+    activeIndex = null;
+    done = true;
+    running = false;
+    hideToken();
+    $("result").textContent = "Completed";
+    $("leader").textContent = `Node ${to + 1} (ID = ${msg.candidate})`;
+    setStatus(`Candidate ID ${msg.candidate} completed the full ring (${msg.hops} hops) and returned to ${at}. ` +
+              `${at} (ID ${msg.candidate}) is the elected leader!`);
+    log(`LEADER ELECTED: ${at}, ID ${msg.candidate} (after ${messageCount} messages).`);
+  } else if (msg.candidate > receiverId) {
+    eliminated.add(msg.origin);
+    hideToken();
+    setStatus(`Candidate ID ${msg.candidate} reaches ${at} (ID ${receiverId}). ` +
+              `${msg.candidate} > ${receiverId}, so the message is discarded.`);
+    log(`ID ${msg.candidate} discarded at ${at}: lower ID ${receiverId} found.`);
+  } else {
+    queue.push(msg);   // forward: goes to the back of the queue
+    setStatus(`Candidate ID ${msg.candidate} reaches ${at} (ID ${receiverId}). ` +
+              `${msg.candidate} < ${receiverId}, so the message is forwarded to Node ${(to + 1) % N + 1}.`);
+    log(`ID ${msg.candidate} forwarded by ${at}.`);
+  }
+
+  renderNodes();
+  busy = false;
+  updateButtons();
+}
+
+async function run() {
+  const myGen = gen;
+  while (running && !done && myGen === gen) {
+    await step();
+    if (myGen !== gen) return;
+    if (running && !done) await sleep(GAP_MS);
+  }
+  if (myGen === gen) { running = false; updateButtons(); }
+}
+
+function start() {
+  if (running || done) return;
+  running = true;
+  updateButtons();
+  run();
+}
+
+function pause() {
+  running = false;   // current step finishes, then the loop stops
+  updateButtons();
+}
+
+function reset() {
+  gen++;             // cancels any in-flight animation / loop
+  running = false; busy = false; done = false; started = false;
+  messageCount = 0; leaderIndex = null; activeIndex = null;
+  eliminated = new Set();
+  queue = [];
+
+  hideToken();
+  renderNodes();
+  $("count").textContent = "0";
+  $("result").textContent = "Not started";
+  $("leader").textContent = "Not elected";
+  setStatus("Ready. Press Start or Next Step to begin the election.");
+  $("log").textContent = "Waiting for simulation...";
+  updateButtons();
+}
+
+// ---------- ID editor ----------
+const idInputs = ids.map((_, i) => {
+  const wrap = document.createElement("label");
+  wrap.textContent = `Node N${i + 1}`;
+  const inp = document.createElement("input");
+  inp.type = "number"; inp.min = "1"; inp.step = "1";
+  inp.value = DEFAULT_IDS[i];
+  inp.setAttribute("aria-label", `ID of node N${i + 1}`);
+  wrap.appendChild(inp);
+  $("idEditor").appendChild(wrap);
+  return inp;
+});
+
+function fillInputs(values) { idInputs.forEach((inp, i) => inp.value = values[i]); }
+
+function applyIds(values) {
+  const err = $("idError");
+  const nums = values.map(v => Number(v));
+  if (nums.some((n, i) => String(values[i]).trim() === "" || !Number.isInteger(n) || n < 1)) {
+    err.textContent = "Every ID must be a positive whole number."; return false;
+  }
+  if (new Set(nums).size !== nums.length) {
+    err.textContent = "IDs must be unique: two nodes cannot share the same ID."; return false;
+  }
+  err.textContent = "";
+  ids = nums;
+  idEls.forEach((el, i) => el.textContent = `ID = ${ids[i]}`);
+  reset();
+  return true;
+}
+
+$("applyIds").addEventListener("click", () => applyIds(idInputs.map(i => i.value)));
+$("defaultIds").addEventListener("click", () => { fillInputs(DEFAULT_IDS); applyIds(DEFAULT_IDS); });
+$("randomIds").addEventListener("click", () => {
+  const pool = Array.from({ length: 30 }, (_, i) => i + 1);
+  const pick = [];
+  while (pick.length < N) pick.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  fillInputs(pick); applyIds(pick);
+});
+
+$("start").addEventListener("click", start);
+$("pause").addEventListener("click", pause);
+$("step").addEventListener("click", () => { if (!running) step(); });
+$("reset").addEventListener("click", reset);
+
+gen = 0;
+reset();
+</script>
+</body>
+</html>
